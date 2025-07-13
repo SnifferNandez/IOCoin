@@ -86,7 +86,12 @@ OBJS= \
     obj/keccak.o\
     obj/skein.o \
     obj/kernel.o \
-    obj/pbkdf2.o
+    obj/pbkdf2.o \
+    obj/rosetta/rosetta.o \
+    obj/rosetta/data_api.o \
+    obj/rosetta/construction_api.o \
+    obj/rosetta/rosetta_server.o \
+    obj/rosetta/rosetta_main.o
 
 all: iocoind.exe
 

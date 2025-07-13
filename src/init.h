@@ -8,6 +8,7 @@
 #include "wallet.h"
 
 extern __wx__* pwalletMain;
+extern bool fShutdown;
 void StartShutdown();
 void Shutdown(void* parg);
 bool AppInit2();

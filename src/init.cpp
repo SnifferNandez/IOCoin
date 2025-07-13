@@ -10,6 +10,7 @@
 #include "util.h"
 #include "ui_interface.h"
 #include "checkpoints.h"
+#include "rosetta/rosetta.h"
 #include <boost/filesystem.hpp>
 #include <boost/filesystem/fstream.hpp>
 #include <boost/filesystem/convenience.hpp>
@@ -18,6 +19,11 @@
 #include <openssl/crypto.h>
 
 #include "main.h"
+
+// Rosetta API thread function declaration
+namespace Rosetta {
+    void ThreadRosettaServer(void* parg);
+}
 
 #ifndef WIN32
 #include <signal.h>
@@ -292,6 +298,8 @@ std::string HelpMessage()
         "  -alertnotify=<cmd>     " + _("Execute command when a relevant alert is received (%s in cmd is replaced by message)") + "\n" +
         "  -upgradewallet         " + _("Upgrade wallet to latest format") + "\n" +
         "  -keypool=<n>           " + _("Set key pool size to <n> (default: 100)") + "\n" +
+        "  -rosetta               " + _("Enable Rosetta API server (default: 0)") + "\n" +
+        "  -rosettaport=<n>       " + _("Listen for Rosetta API connections on port <n> (default: 8080)") + "\n" +
         "  -rescan                " + _("Rescan the block chain for missing wallet transactions") + "\n" +
         "  -xscan                " + _("Rescan the block chain for aliases") + "\n" +
         "  -salvagewallet         " + _("Attempt to recover private keys from a corrupt wallet.dat") + "\n" +
@@ -962,6 +970,10 @@ bool AppInit2()
 
     if (fServer)
         NewThread(ThreadRPCServer, NULL);
+
+    // Start Rosetta API server if enabled
+    if (GetBoolArg("-rosetta", false))
+        NewThread(Rosetta::ThreadRosettaServer, NULL);
 
     // ********************************************************* Step 12: finished
 
