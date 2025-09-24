@@ -18,6 +18,7 @@ class CBlockIndex;
 
 #include "util.h"
 #include "checkpoints.h"
+#include <atomic>
 
 // HTTP status codes
 enum HTTPStatusCode
@@ -308,5 +309,10 @@ extern json_spirit::Value myRSAKeys(const json_spirit::Array& params, bool fHelp
 extern json_spirit::Value node_rescan(const json_spirit::Array& params, bool fHelp);
 extern json_spirit::Value nodeDebug(const json_spirit::Array& params, bool fHelp);
 extern json_spirit::Value nodeDebug1(const json_spirit::Array& params, bool fHelp);
+
+// Rapid RPC cache declarations
+extern std::atomic<bool> g_rpcRapidEnabled;
+extern void ThreadRPCRapidUpdate(void* parg);
+extern void EnableRPCRapid(bool enable);
 
 #endif

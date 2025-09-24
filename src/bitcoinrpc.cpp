@@ -10,6 +10,8 @@
 #include "base58.h"
 #include "bitcoinrpc.h"
 #include "db.h"
+#include <boost/thread.hpp>
+#include <atomic>
 
 #undef printf
 #include <boost/asio.hpp>
@@ -900,12 +902,12 @@ void ThreadRPCServer2(void* parg)
         context.set_options(ssl::context::no_sslv2);
 
         boost::filesystem::path pathCertFile(GetArg("-rpcsslcertificatechainfile", "server.cert"));
-        if (!pathCertFile.is_complete()) pathCertFile = boost::filesystem::path(GetDataDir()) / pathCertFile;
+        if (!pathCertFile.is_absolute()) pathCertFile = boost::filesystem::path(GetDataDir()) / pathCertFile;
         if (boost::filesystem::exists(pathCertFile)) context.use_certificate_chain_file(pathCertFile.string());
         else printf("ThreadRPCServer ERROR: missing server certificate file %s\n", pathCertFile.string().c_str());
 
         boost::filesystem::path pathPKFile(GetArg("-rpcsslprivatekeyfile", "server.pem"));
-        if (!pathPKFile.is_complete()) pathPKFile = boost::filesystem::path(GetDataDir()) / pathPKFile;
+        if (!pathPKFile.is_absolute()) pathPKFile = boost::filesystem::path(GetDataDir()) / pathPKFile;
         if (boost::filesystem::exists(pathPKFile)) context.use_private_key_file(pathPKFile.string(), ssl::context::pem);
         else printf("ThreadRPCServer ERROR: missing server private key file %s\n", pathPKFile.string().c_str());
 
@@ -1062,6 +1064,97 @@ static string JSONRPCExecBatch(const Array& vReq)
 
 static CCriticalSection cs_THREAD_RPCHANDLER;
 
+// Rapid RPC cache (lightweight, best-effort values)
+static std::atomic<int> g_rpcCachedBlockCount(0);
+static std::string g_rpcCachedBestBlockHashHex;
+static std::atomic<int> g_rpcCachedUptimeSec(0);
+std::atomic<bool> g_rpcRapidEnabled(false);
+static int64_t g_rpcStartTime = 0;
+
+void EnableRPCRapid(bool enable)
+{
+    g_rpcRapidEnabled.store(enable, std::memory_order_relaxed);
+}
+
+// Called periodically to refresh cached values without taking heavy locks
+static void RPCRapidRefreshOnce()
+{
+    // nBestHeight, hashBestChain, and time are global/shared; reads are best-effort
+    extern int nBestHeight;
+    extern uint256 hashBestChain;
+
+    g_rpcCachedBlockCount.store(nBestHeight, std::memory_order_relaxed);
+    g_rpcCachedBestBlockHashHex = hashBestChain.GetHex();
+
+    int64_t now = GetTime();
+    int64_t up = (g_rpcStartTime > 0 && now >= g_rpcStartTime) ? (now - g_rpcStartTime) : 0;
+    g_rpcCachedUptimeSec.store((int)up, std::memory_order_relaxed);
+}
+
+void ThreadRPCRapidUpdate(void* parg)
+{
+    RenameThread("iocoin-rpcrapid");
+    // Initialize cache baseline
+    g_rpcStartTime = GetTime();
+    RPCRapidRefreshOnce();
+
+    while (!fShutdown && g_rpcRapidEnabled.load(std::memory_order_relaxed))
+    {
+        RPCRapidRefreshOnce();
+        MilliSleep(1000);
+    }
+}
+
+// Try to answer common RPCs from cache to avoid core locks during IBD
+static bool TryRapidRPC(const std::string& method, const Array& params, Value& out)
+{
+    if (!g_rpcRapidEnabled.load(std::memory_order_relaxed))
+        return false;
+
+    if (method == "getblockcount")
+    {
+        out = Value((int64_t)g_rpcCachedBlockCount.load(std::memory_order_relaxed));
+        return true;
+    }
+    if (method == "getbestblockhash")
+    {
+        out = Value(g_rpcCachedBestBlockHashHex);
+        return true;
+    }
+    if (method == "uptime")
+    {
+        out = Value((int64_t)g_rpcCachedUptimeSec.load(std::memory_order_relaxed));
+        return true;
+    }
+    if (method == "getnetworkinfo")
+    {
+        Object obj;
+        obj.push_back(Pair("version",       FormatFullVersion()));
+        obj.push_back(Pair("protocolversion",(int)PROTOCOL_VERSION));
+        obj.push_back(Pair("timeoffset",    (int64_t)GetTimeOffset()));
+        obj.push_back(Pair("connections",   (int)vNodes.size()));
+        out = obj;
+        return true;
+    }
+    // TODO: Optionally add lightweight getinfo fast path later (wallet fields require locks)
+    if (method == "getinfo")
+    {
+        // Provide lightweight subset without touching wallet locks
+        Object obj;
+        obj.push_back(Pair("version",         FormatFullVersion()));
+        obj.push_back(Pair("protocolversion", (int)PROTOCOL_VERSION));
+        obj.push_back(Pair("blocks",          (int64_t)g_rpcCachedBlockCount.load(std::memory_order_relaxed)));
+        obj.push_back(Pair("bestblockhash",   g_rpcCachedBestBlockHashHex));
+        obj.push_back(Pair("timeoffset",      (int64_t)GetTimeOffset()));
+        obj.push_back(Pair("connections",     (int)vNodes.size()));
+        obj.push_back(Pair("testnet",         GetBoolArg("-testnet", false)));
+        obj.push_back(Pair("errors",          GetWarnings("statusbar")));
+        out = obj;
+        return true;
+    }
+    return false;
+}
+
 void ThreadRPCServer3(void* parg)
 {
     // Make this thread recognisable as the RPC handler
@@ -1126,10 +1219,18 @@ void ThreadRPCServer3(void* parg)
             if (valRequest.type() == obj_type) {
                 jreq.parse(valRequest);
 
-                Value result = tableRPC.execute(jreq.strMethod, jreq.params);
-
-                // Send reply
-                strReply = JSONRPCReply(result, Value::null, jreq.id);
+                // Rapid fast-path
+                Value rapidResult;
+                if (TryRapidRPC(jreq.strMethod, jreq.params, rapidResult))
+                {
+                    strReply = JSONRPCReply(rapidResult, Value::null, jreq.id);
+                }
+                else
+                {
+                    Value result = tableRPC.execute(jreq.strMethod, jreq.params);
+                    // Send reply
+                    strReply = JSONRPCReply(result, Value::null, jreq.id);
+                }
 
             // array of requests
             } else if (valRequest.type() == array_type)

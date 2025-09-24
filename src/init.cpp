@@ -963,6 +963,15 @@ bool AppInit2()
     if (fServer)
         NewThread(ThreadRPCServer, NULL);
 
+    // Start rapid RPC updater if enabled
+    if (fServer && GetBoolArg("-rpcrapid"))
+    {
+        extern void ThreadRPCRapidUpdate(void* parg);
+        extern std::atomic<bool> g_rpcRapidEnabled;
+        g_rpcRapidEnabled.store(true, std::memory_order_relaxed);
+        NewThread(ThreadRPCRapidUpdate, NULL);
+    }
+
     // ********************************************************* Step 12: finished
 
     uiInterface.InitMessage(_("Done loading"));
@@ -980,6 +989,12 @@ bool AppInit2()
     while (1)
         MilliSleep(5000);
 #endif
+
+    // Signal rapid thread to stop if running
+    {
+        extern std::atomic<bool> g_rpcRapidEnabled;
+        g_rpcRapidEnabled.store(false, std::memory_order_relaxed);
+    }
 
     return true;
 }
